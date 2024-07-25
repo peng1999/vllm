@@ -297,8 +297,10 @@ def _prepare_seq_groups(
             num_prompts)
 
 
+from _sampling_tensors import SamplingTensors
+
 @dataclass
-class SamplingTensors:
+class SamplingTensors_py:
     """Tensors for sampling."""
 
     temperatures: torch.Tensor

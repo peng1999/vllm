@@ -309,3 +309,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     add_dependencies(default _punica_C)
   endif()
 endif()
+
+set(PYBIND11_FINDPYTHON ON)
+find_package(pybind11 REQUIRED)
+find_package(Torch REQUIRED)
+find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
+
+pybind11_add_module(_sampling_tensors cext/sampling_tensors.cpp)
+target_link_libraries(_sampling_tensors PRIVATE torch ${TORCH_PYTHON_LIBRARY})

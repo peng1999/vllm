@@ -88,8 +88,15 @@ def remove_prefix(text, prefix):
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+    def __init__(self,
+                 name: str,
+                 cmake_lists_dir: str = '.',
+                 py_limited_api=True,
+                 **kwa) -> None:
+        super().__init__(name,
+                         sources=[],
+                         py_limited_api=py_limited_api,
+                         **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -448,6 +455,9 @@ if _build_custom_ops():
 
     if _install_punica():
         ext_modules.append(CMakeExtension(name="vllm._punica_C"))
+
+ext_modules.append(
+    CMakeExtension(name="vllm._sampling_tensors", py_limited_api=False))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
