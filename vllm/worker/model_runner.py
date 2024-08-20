@@ -7,6 +7,7 @@ import weakref
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
                     TypeVar, Union)
+from threading import Lock
 
 import numpy as np
 import torch
@@ -77,6 +78,8 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
+
+SYNC_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -1463,6 +1466,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
+        SYNC_LOCK.acquire()
+
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
@@ -1564,11 +1569,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         "model_forward_time", torch.tensor(0.0)).item()
                 hidden_or_intermediate_states.tensors["model_forward_time"] = (
                     torch.tensor(model_forward_time + orig_model_forward_time))
+            SYNC_LOCK.release()
             return hidden_or_intermediate_states
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
+        SYNC_LOCK.release()
         if not self.is_driver_worker:
             return []
 

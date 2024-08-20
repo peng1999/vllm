@@ -1,3 +1,4 @@
+import threading
 import time
 from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
@@ -108,6 +109,8 @@ class LLMEngine:
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
+    seq_counter: ClassVar[Counter] = Counter()
+    seq_counter_lock = threading.Lock()
 
     DO_VALIDATE_OUTPUT: ClassVar[bool] = False
     """A flag to toggle whether to validate the type of request output."""
@@ -257,7 +260,6 @@ class LLMEngine:
                                      "make sure skip_tokenizer_init is False")
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
-        self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
@@ -582,7 +584,8 @@ class LLMEngine:
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
-        seq_id = next(self.seq_counter)
+        with self.seq_counter_lock:
+            seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,

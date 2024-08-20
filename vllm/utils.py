@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import datetime
 import enum
+import functools
 import gc
 import os
 import socket
@@ -1104,3 +1105,12 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def synchronized(f):
+    @functools.wraps(f)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return f(self, *args, **kwargs)
+    return wrapper
+

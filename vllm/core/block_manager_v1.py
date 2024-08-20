@@ -3,6 +3,7 @@ import math
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
+from threading import Lock
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple
@@ -14,7 +15,7 @@ from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
+from vllm.utils import Device, synchronized
 
 logger = init_logger(__name__)
 
@@ -278,9 +279,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # request ID
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
+        self._lock = Lock()
+
     def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
         return 0 if seq is None else seq.n_blocks
 
+    @synchronized
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
@@ -335,6 +339,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         return block_table
 
+    @synchronized
     def allocate(self, seq_group: SequenceGroup) -> None:
         is_encoder_decoder = seq_group.is_encoder_decoder()
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
@@ -366,6 +371,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
 
+    @synchronized
     def can_append_slots(self,
                          seq_group: SequenceGroup,
                          num_lookahead_slots: int = 0) -> bool:
@@ -443,6 +449,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             assert new_block.ref_count == 1
         return new_block
 
+    @synchronized
     def append_slots(
         self,
         seq: Sequence,
@@ -489,6 +496,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self.gpu_allocator.free(last_block)
             return [(last_block.block_number, new_block.block_number)]
 
+    @synchronized
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
         # Thus, it is always safe from OOM.
@@ -522,6 +530,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 
+    @synchronized
     def can_swap_in(self,
                     seq_group: SequenceGroup,
                     num_lookahead_slots: int = 0) -> AllocStatus:
@@ -565,6 +574,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         return new_block_table
 
+    @synchronized
     def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
 
         request_id = seq_group.request_id
@@ -588,10 +598,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         return [(cpu_block.block_number, gpu_block.block_number)
                 for cpu_block, gpu_block in mapping.items()]
 
+    @synchronized
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
+    @synchronized
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         request_id = seq_group.request_id
 
@@ -629,6 +641,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             else:
                 self.cpu_allocator.free(block)
 
+    @synchronized
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
@@ -655,19 +668,24 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self._free_block_table(block_table)
         self.cross_block_tables.clear()
 
+    @synchronized
     def get_block_table(self, seq: Sequence) -> List[int]:
         return self.block_tables[seq.seq_id].ids()
 
+    @synchronized
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         block_table = self.cross_block_tables[seq_group.request_id]
         return [block.block_number for block in block_table]
 
+    @synchronized
     def get_num_free_gpu_blocks(self) -> int:
         return self.gpu_allocator.get_num_free_blocks()
 
+    @synchronized
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
 
+    @synchronized
     def access_all_blocks_in_seq(
         self,
         seq: Sequence,
@@ -704,6 +722,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for b in takewhile(lambda b: b.computed, block_table[:-1])
         ]
 
+    @synchronized
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
         """Return the block ids that are common for a given sequence group.
@@ -717,6 +736,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
         return commonprefix([ids for ids in ids_list if ids != []])
 
+    @synchronized
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         if self.enable_caching:
             for seq in seq_group.get_seqs():

@@ -1,5 +1,7 @@
+from threading import Thread, Lock
 from typing import List, Optional, Sequence, Union, cast
 
+import torch.cuda
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -70,13 +72,17 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.streams = [torch.cuda.Stream() for _ in range(3)]
+        self.llm_engines = []
+        for stream in self.streams:
+            with torch.cuda.stream(stream):
+                self.llm_engines.append(LLMEngine.from_engine_args(
+                    engine_args, usage_context=UsageContext.LLM_CLASS))
         self.request_counter = Counter()
 
     def get_tokenizer(
             self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-        return self.llm_engine.tokenizer.tokenizer
+        return self.llm_engines[0].tokenizer.tokenizer
 
     def generate(
         self,
@@ -91,7 +97,7 @@ class LLM:
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
-        if self.llm_engine.model_config.embedding_mode:
+        if self.llm_engines[0].model_config.embedding_mode:
             raise ValueError(
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).")
@@ -170,9 +176,10 @@ class LLM:
                                          LoRARequest]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
-        request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(
-            request_id,
+        request_id = next(self.request_counter)
+        engine_id = request_id % len(self.llm_engines)
+        self.llm_engines[engine_id].add_request(
+            str(request_id),
             inputs,
             params,
             lora_request=lora_request,
@@ -184,7 +191,7 @@ class LLM:
             guided_options: Optional[GuidedDecodingRequest] = None):
         if guided_options:
             if guided_options.guided_decoding_backend is None:
-                decoding_config = self.llm_engine.get_decoding_config()
+                decoding_config = self.llm_engines[0].get_decoding_config()
                 guided_options.guided_decoding_backend = (
                     decoding_config.guided_decoding_backend)
             guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
@@ -201,7 +208,9 @@ class LLM:
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
-            num_requests = self.llm_engine.get_num_unfinished_requests()
+            num_requests = sum(
+                llm_engine.get_num_unfinished_requests() for llm_engine in
+                self.llm_engines)
             pbar = tqdm(
                 total=num_requests,
                 desc="Processed prompts",
@@ -209,29 +218,47 @@ class LLM:
                 postfix=(f"est. speed input: {0:.2f} toks/s, "
                          f"output: {0:.2f} toks/s"),
             )
+        else:
+            pbar = None
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
-        while self.llm_engine.has_unfinished_requests():
-            step_outputs = self.llm_engine.step()
-            for output in step_outputs:
-                if output.finished:
-                    outputs.append(output)
-                    if use_tqdm:
-                        if isinstance(output, RequestOutput):
-                            # Calculate tokens only for RequestOutput
-                            total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
-                            total_out_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            out_spd = total_out_toks / pbar.format_dict[
-                                "elapsed"]
-                            pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
-        if use_tqdm:
+        lock = Lock()
+
+        def update_pbar(output):
+            nonlocal total_in_toks, total_out_toks
+
+            with lock:
+                if isinstance(output, RequestOutput):
+                    # Calculate tokens only for RequestOutput
+                    total_in_toks += len(output.prompt_token_ids)
+                    in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                    total_out_toks += sum(
+                        len(stp.token_ids) for stp in output.outputs)
+                    out_spd = total_out_toks / pbar.format_dict["elapsed"]
+                    pbar.postfix = (
+                        f"est. speed input: {in_spd:.2f} toks/s, "
+                        f"output: {out_spd:.2f} toks/s")
+                pbar.update(1)
+
+        def run_engine(llm_engine: LLMEngine, stream: torch.cuda.Stream):
+            with torch.cuda.stream(stream):
+                while llm_engine.has_unfinished_requests():
+                    step_outputs = llm_engine.step()
+                    for output in step_outputs:
+                        if output.finished:
+                            outputs.append(output)
+                            if pbar is not None:
+                                    update_pbar(output)
+
+        threads = [Thread(target=run_engine, args=(llm_engine, stream)) for
+                   llm_engine, stream in zip(self.llm_engines, self.streams)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if pbar is not None:
             pbar.close()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
