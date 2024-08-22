@@ -48,7 +48,7 @@ from vllm.transformers_utils.tokenizer_group import (
     AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device
+from vllm.utils import Counter, Device, SYNC_LOCK
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -1294,6 +1294,8 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
+
+        SYNC_LOCK.acquire()
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             0].schedule()
 
@@ -1331,6 +1333,7 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
+        SYNC_LOCK.release()
         return request_outputs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:

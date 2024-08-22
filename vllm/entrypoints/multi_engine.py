@@ -72,7 +72,7 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-        self.streams = [torch.cuda.Stream() for _ in range(3)]
+        self.streams = [torch.cuda.Stream() for _ in range(2)]
         self.llm_engines = []
         for stream in self.streams:
             with torch.cuda.stream(stream):

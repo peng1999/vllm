@@ -14,6 +14,7 @@ import threading
 import uuid
 import warnings
 from asyncio import FIRST_COMPLETED, ensure_future
+from collections import deque
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -1108,9 +1109,59 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 
 
 def synchronized(f):
-    @functools.wraps(f)
-    def wrapper(self, *args, **kwargs):
-        with self._lock:
-            return f(self, *args, **kwargs)
-    return wrapper
+    return f
+    # @functools.wraps(f)
+    # def wrapper(self, *args, **kwargs):
+    #     with self._lock:
+    #         return f(self, *args, **kwargs)
+    # return wrapper
+
+
+class FairLock:
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.waiters = deque()
+
+    def locked(self):
+        """
+        Checks if the lock is currently held by any thread.
+        """
+        with self.cv:
+            return bool(self.waiters)
+
+    def acquire(self):
+        """
+        Acquires the lock in a fair manner.
+        """
+        with self.cv:
+            self.waiters.append(threading.current_thread())
+            while self.waiters[0] is not threading.current_thread():
+                self.cv.wait()
+
+    def release(self):
+        """
+        Releases the lock and notifies the next waiting thread.
+        """
+        with self.cv:
+            assert self.waiters and self.waiters[0] is threading.current_thread()
+            self.waiters.popleft()
+            if self.waiters:
+                self.cv.notify()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+SYNC_LOCK = FairLock()
+
+def unblock_synchronize_stream():
+    relock = SYNC_LOCK.locked()
+    if relock:
+        SYNC_LOCK.release()
+    torch.cuda.current_stream().synchronize()
+    if relock:
+        SYNC_LOCK.acquire()
 

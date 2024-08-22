@@ -1,5 +1,6 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+import time
 import warnings
 from importlib.util import find_spec
 from math import inf
@@ -9,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils import SYNC_LOCK, unblock_synchronize_stream
 
 if HAS_TRITON:
     from vllm.model_executor.layers.ops.sample import sample as sample_triton
@@ -533,6 +535,8 @@ def _top_k_top_p_multinomial_with_flashinfer(
         top_ks,
         top_ps,
     )
+
+    unblock_synchronize_stream()
     if not success.all():
         warnings.warn("FlashInfer rejection sampling failed, fallback.",
                       stacklevel=1)
