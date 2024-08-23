@@ -631,6 +631,7 @@ def _sample_with_torch(
                     probs[long_sample_indices],
                     max_best_of_in_batch,
                     seq_groups=seq_groups_arg)
+                unblock_synchronize_stream()
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
@@ -645,7 +646,6 @@ def _sample_with_torch(
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
     # Call synchronize manually to release the GIL
-    torch.cuda.current_stream().synchronize()
     if not sampling_metadata.skip_sampler_cpu_output:
         for sampling_type in SamplingType:
             if sampling_type not in sample_metadata:
