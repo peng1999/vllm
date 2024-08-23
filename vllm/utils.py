@@ -1108,15 +1108,6 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
-def synchronized(f):
-    return f
-    # @functools.wraps(f)
-    # def wrapper(self, *args, **kwargs):
-    #     with self._lock:
-    #         return f(self, *args, **kwargs)
-    # return wrapper
-
-
 class FairLock:
     def __init__(self):
         self.cv = threading.Condition()
