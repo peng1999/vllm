@@ -792,6 +792,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     _model_input_cls: Type[TModelInputForGPU]
     _builder_cls: Type[ModelInputForGPUBuilder]
 
+    MODEL_CACHE: Dict[str, torch.nn.Module] = {}
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -886,19 +888,23 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             SamplingMetadataCache()
 
     def load_model(self) -> None:
-        logger.info("Starting to load model %s...", self.model_config.model)
-        with CudaMemoryProfiler() as m:
-            self.model = get_model(model_config=self.model_config,
-                                   device_config=self.device_config,
-                                   load_config=self.load_config,
-                                   lora_config=self.lora_config,
-                                   parallel_config=self.parallel_config,
-                                   scheduler_config=self.scheduler_config,
-                                   cache_config=self.cache_config)
+        if self.model_config.model not in self.MODEL_CACHE:
+            logger.info("Starting to load model %s...", self.model_config.model)
+            with CudaMemoryProfiler() as m:
+                self.model = get_model(model_config=self.model_config,
+                                    device_config=self.device_config,
+                                    load_config=self.load_config,
+                                    lora_config=self.lora_config,
+                                    parallel_config=self.parallel_config,
+                                    scheduler_config=self.scheduler_config,
+                                    cache_config=self.cache_config)
 
-        self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+            self.model_memory_usage = m.consumed_memory
+            logger.info("Loading model weights took %.4f GB",
+                        self.model_memory_usage / float(2**30))
+            self.MODEL_CACHE[self.model_config.model] = self.model
+        else:
+            self.model = self.MODEL_CACHE[self.model_config.model]
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
