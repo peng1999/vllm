@@ -1,3 +1,4 @@
+import time
 from threading import Thread, Lock
 from typing import List, Optional, Sequence, Union, cast
 
@@ -242,9 +243,15 @@ class LLM:
                         f"output: {out_spd:.2f} toks/s")
                 pbar.update(1)
 
+        decode_start_time: Optional[float] = None
+
         def run_engine(llm_engine: LLMEngine, stream: torch.cuda.Stream):
             with torch.cuda.stream(stream):
                 while llm_engine.has_unfinished_requests():
+                    nonlocal decode_start_time
+                    if decode_start_time is None and not \
+                            llm_engine.scheduler[0].waiting:
+                        decode_start_time = time.perf_counter()
                     step_outputs = llm_engine.step()
                     for output in step_outputs:
                         if output.finished:
@@ -258,8 +265,12 @@ class LLM:
             t.start()
         for t in threads:
             t.join()
+        decode_finish_time = time.perf_counter()
         if pbar is not None:
             pbar.close()
+        if decode_start_time:
+            tpt = total_out_toks / (decode_finish_time - decode_start_time)
+            print(f"decode throughput: {tpt:.2f} tok/s")
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

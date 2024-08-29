@@ -1,3 +1,4 @@
+import time
 from contextlib import contextmanager
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
@@ -682,7 +683,10 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        decode_start_time: Optional[float] = None
         while self.llm_engine.has_unfinished_requests():
+            if decode_start_time is None and not self.llm_engine.scheduler[0].waiting:
+                decode_start_time = time.perf_counter()
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
@@ -700,8 +704,12 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+        decode_finish_time = time.perf_counter()
         if use_tqdm:
             pbar.close()
+        if decode_start_time:
+            tpt = total_out_toks / (decode_finish_time - decode_start_time)
+            print(f"decode throughput: {tpt:.2f} tok/s")
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
