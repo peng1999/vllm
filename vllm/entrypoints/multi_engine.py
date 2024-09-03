@@ -73,17 +73,16 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-        self.streams = [torch.cuda.Stream() for _ in range(2)]
-        self.llm_engines = []
-        for stream in self.streams:
-            with torch.cuda.stream(stream):
-                self.llm_engines.append(LLMEngine.from_engine_args(
-                    engine_args, usage_context=UsageContext.LLM_CLASS))
+        self.thread_count = 2
+        self.streams = [torch.cuda.Stream() for _ in range(self.thread_count)]
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS,
+            thread_cnt=self.thread_count)
         self.request_counter = Counter()
 
     def get_tokenizer(
             self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-        return self.llm_engines[0].tokenizer.tokenizer
+        return self.llm_engine.tokenizer.tokenizer
 
     def generate(
         self,
@@ -98,7 +97,7 @@ class LLM:
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
-        if self.llm_engines[0].model_config.embedding_mode:
+        if self.llm_engine.model_config.embedding_mode:
             raise ValueError(
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).")
@@ -178,8 +177,7 @@ class LLM:
             prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
         request_id = next(self.request_counter)
-        engine_id = request_id % len(self.llm_engines)
-        self.llm_engines[engine_id].add_request(
+        self.llm_engine.add_request(
             str(request_id),
             inputs,
             params,
@@ -192,7 +190,7 @@ class LLM:
             guided_options: Optional[GuidedDecodingRequest] = None):
         if guided_options:
             if guided_options.guided_decoding_backend is None:
-                decoding_config = self.llm_engines[0].get_decoding_config()
+                decoding_config = self.llm_engine.get_decoding_config()
                 guided_options.guided_decoding_backend = (
                     decoding_config.guided_decoding_backend)
             guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
@@ -209,9 +207,8 @@ class LLM:
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
-            num_requests = sum(
-                llm_engine.get_num_unfinished_requests() for llm_engine in
-                self.llm_engines)
+            num_requests = self.llm_engine.get_num_unfinished_requests()
+
             pbar = tqdm(
                 total=num_requests,
                 desc="Processed prompts",
@@ -245,22 +242,24 @@ class LLM:
 
         decode_start_time: Optional[float] = None
 
-        def run_engine(llm_engine: LLMEngine, stream: torch.cuda.Stream):
+        def run_engine(thread_idx: int):
+            stream = self.streams[thread_idx]
             with torch.cuda.stream(stream):
-                while llm_engine.has_unfinished_requests():
+                while self.llm_engine.has_unfinished_requests():
                     nonlocal decode_start_time
                     if decode_start_time is None and not \
-                            llm_engine.scheduler[0].waiting:
+                            self.llm_engine.scheduler[0].waiting:
+                        logger.info(f'start decoding')
                         decode_start_time = time.perf_counter()
-                    step_outputs = llm_engine.step()
+                    step_outputs = self.llm_engine.step(thread_idx)
                     for output in step_outputs:
                         if output.finished:
                             outputs.append(output)
                             if pbar is not None:
                                     update_pbar(output)
 
-        threads = [Thread(target=run_engine, args=(llm_engine, stream)) for
-                   llm_engine, stream in zip(self.llm_engines, self.streams)]
+        threads = [Thread(target=run_engine, args=(idx,)) for
+                   idx in range(self.thread_count)]
         for t in threads:
             t.start()
         for t in threads:
@@ -270,7 +269,7 @@ class LLM:
             pbar.close()
         if decode_start_time:
             tpt = total_out_toks / (decode_finish_time - decode_start_time)
-            print(f"decode throughput: {tpt:.2f} tok/s")
+            logger.info(f"decode throughput: {tpt:.2f} tok/s")
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

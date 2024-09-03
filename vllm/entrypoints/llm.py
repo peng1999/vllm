@@ -686,6 +686,7 @@ class LLM:
         decode_start_time: Optional[float] = None
         while self.llm_engine.has_unfinished_requests():
             if decode_start_time is None and not self.llm_engine.scheduler[0].waiting:
+                logger.info(f'start decoding')
                 decode_start_time = time.perf_counter()
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -709,7 +710,7 @@ class LLM:
             pbar.close()
         if decode_start_time:
             tpt = total_out_toks / (decode_finish_time - decode_start_time)
-            print(f"decode throughput: {tpt:.2f} tok/s")
+            logger.info(f"decode throughput: {tpt:.2f} tok/s")
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

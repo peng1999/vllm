@@ -291,10 +291,10 @@ def scheduled_seq_group_builder():
     return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
 
-GLOBAL_BLOCK_MANAGER = None
-
 
 class Scheduler:
+
+    block_manager: BlockSpaceManager = None
 
     def __init__(
         self,
@@ -327,20 +327,16 @@ class Scheduler:
         if num_cpu_blocks:
             num_cpu_blocks //= pipeline_parallel_size
 
-        global GLOBAL_BLOCK_MANAGER
-        if GLOBAL_BLOCK_MANAGER is None:
+        if Scheduler.block_manager is None:
             # Create the block space manager.
-            self.block_manager = BlockSpaceManagerImpl(
+            Scheduler.block_manager = BlockSpaceManagerImpl(
                 block_size=self.cache_config.block_size,
                 num_gpu_blocks=num_gpu_blocks,
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching)
-            GLOBAL_BLOCK_MANAGER = self.block_manager
         else:
-            self.block_manager = GLOBAL_BLOCK_MANAGER
             assert type(self.block_manager) == BlockSpaceManagerImpl
-            assert self.block_manager.block_size == self.cache_config.block_size
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.

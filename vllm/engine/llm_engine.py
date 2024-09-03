@@ -181,6 +181,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        thread_cnt: int = 0,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -325,6 +326,8 @@ class LLMEngine:
             # different process.
             self.tokenizer.ping()
 
+        assert parallel_config.pipeline_parallel_size == 1 or (
+                    thread_cnt == 1), "Pipline parallel and multi-thread is incompatible"
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -332,6 +335,7 @@ class LLMEngine:
             Scheduler(scheduler_config, cache_config, lora_config,
                       parallel_config.pipeline_parallel_size)
             for _ in range(parallel_config.pipeline_parallel_size)
+            for _ in range(thread_cnt)
         ]
 
         # Metric Logging.
@@ -464,6 +468,7 @@ class LLMEngine:
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        thread_cnt: int = 1,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -476,6 +481,7 @@ class LLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            thread_cnt=thread_cnt,
         )
 
         return engine
@@ -1239,7 +1245,7 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(self, thread_idx: int = 0) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1297,11 +1303,11 @@ class LLMEngine:
 
         SYNC_LOCK.acquire()
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
-            0].schedule()
+            thread_idx].schedule()
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
-                0].get_and_reset_finished_requests_ids()
+                thread_idx].get_and_reset_finished_requests_ids()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
