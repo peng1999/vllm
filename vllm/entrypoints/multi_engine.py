@@ -247,8 +247,8 @@ class LLM:
             with torch.cuda.stream(stream):
                 while self.llm_engine.has_unfinished_requests():
                     nonlocal decode_start_time
-                    if decode_start_time is None and not \
-                            self.llm_engine.scheduler[0].waiting:
+                    if decode_start_time is None and not any(scheduler.waiting
+                            for scheduler in self.llm_engine.scheduler):
                         logger.info(f'start decoding')
                         decode_start_time = time.perf_counter()
                     step_outputs = self.llm_engine.step(thread_idx)

@@ -337,6 +337,7 @@ class LLMEngine:
             for _ in range(parallel_config.pipeline_parallel_size)
             for _ in range(thread_cnt)
         ]
+        self.thread_cnt = thread_cnt
 
         # Metric Logging.
         if self.log_stats:
@@ -1391,7 +1392,7 @@ class LLMEngine:
         if num_total_gpu is not None:
             num_free_gpu = sum(
                 scheduler.block_manager.get_num_free_gpu_blocks()
-                for scheduler in self.scheduler)
+                for scheduler in self.scheduler) / self.thread_cnt
             gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
@@ -1399,7 +1400,7 @@ class LLMEngine:
         if num_total_cpu is not None and num_total_cpu > 0:
             num_free_cpu = sum(
                 scheduler.block_manager.get_num_free_cpu_blocks()
-                for scheduler in self.scheduler)
+                for scheduler in self.scheduler) / self.thread_cnt
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Prefix Cache Hit Rate. Note that we always use
