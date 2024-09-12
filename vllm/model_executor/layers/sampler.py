@@ -645,7 +645,6 @@ def _sample_with_torch(
 
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
-    # Call synchronize manually to release the GIL
     if not sampling_metadata.skip_sampler_cpu_output:
         for sampling_type in SamplingType:
             if sampling_type not in sample_metadata:
