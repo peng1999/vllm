@@ -245,7 +245,7 @@ class LLM:
         def run_engine(thread_idx: int):
             stream = self.streams[thread_idx]
             with torch.cuda.stream(stream):
-                while self.llm_engine.has_unfinished_requests():
+                while self.llm_engine.scheduler[thread_idx].has_unfinished_seqs():
                     nonlocal decode_start_time
                     if decode_start_time is None and not any(scheduler.waiting
                             for scheduler in self.llm_engine.scheduler):
