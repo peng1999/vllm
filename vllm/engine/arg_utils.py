@@ -148,6 +148,8 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
 
+    num_threads: int = 1
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -914,6 +916,7 @@ class EngineArgs:
             num_scheduler_steps=self.num_scheduler_steps,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
+            num_threads=self.num_threads,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

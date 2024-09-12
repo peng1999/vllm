@@ -891,7 +891,8 @@ class SchedulerConfig:
                  embedding_mode: Optional[bool] = False,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
-                 send_delta_data: bool = False) -> None:
+                 send_delta_data: bool = False,
+                 num_threads: int = 1) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -922,6 +923,7 @@ class SchedulerConfig:
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
         self.send_delta_data = send_delta_data
+        self.num_threads = num_threads
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -952,6 +954,10 @@ class SchedulerConfig:
                 "num_scheduler_steps "
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
+
+        if self.num_threads not in [1, 2]:
+            raise ValueError(
+                f"num_threads ({self.num_threads}) must be either 1 or 2.")
 
     @property
     def is_multi_step(self) -> bool:

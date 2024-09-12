@@ -1,7 +1,9 @@
 import time
 from contextlib import contextmanager
+from threading import Lock, Thread
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
+import torch
 from tqdm import tqdm
 
 from vllm.engine.arg_utils import EngineArgs
@@ -175,6 +177,7 @@ class LLM:
         )
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.streams = [torch.cuda.Stream() for _ in range(self.llm_engine.scheduler_config.num_threads)]
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:
@@ -343,7 +346,10 @@ class LLM:
             prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request)
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        if self.llm_engine.scheduler_config.num_threads > 1:
+            outputs = self._run_engine_threads(use_tqdm=use_tqdm)
+        else:
+            outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
     def chat(
@@ -707,6 +713,80 @@ class LLM:
                         pbar.update(1)
         decode_finish_time = time.perf_counter()
         if use_tqdm:
+            pbar.close()
+        if decode_start_time:
+            tpt = total_out_toks / (decode_finish_time - decode_start_time)
+            logger.info(f"decode throughput: {tpt:.2f} tok/s")
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def _run_engine_threads(
+            self, *, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        # Initialize tqdm.
+        if use_tqdm:
+            num_requests = self.llm_engine.get_num_unfinished_requests()
+
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=(f"est. speed input: {0:.2f} toks/s, "
+                         f"output: {0:.2f} toks/s"),
+            )
+        else:
+            pbar = None
+        # Run the engine.
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        total_in_toks = 0
+        total_out_toks = 0
+        lock = Lock()
+
+        def update_pbar(output):
+            nonlocal total_in_toks, total_out_toks
+
+            with lock:
+                if isinstance(output, RequestOutput):
+                    # Calculate tokens only for RequestOutput
+                    total_in_toks += len(output.prompt_token_ids)
+                    in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                    total_out_toks += sum(
+                        len(stp.token_ids) for stp in output.outputs)
+                    out_spd = total_out_toks / pbar.format_dict["elapsed"]
+                    pbar.postfix = (
+                        f"est. speed input: {in_spd:.2f} toks/s, "
+                        f"output: {out_spd:.2f} toks/s")
+                pbar.update(1)
+
+        decode_start_time: Optional[float] = None
+
+        def run_engine(thread_idx: int):
+            stream = self.streams[thread_idx]
+            with torch.cuda.stream(stream):
+                while self.llm_engine.scheduler[thread_idx].has_unfinished_seqs():
+                    nonlocal decode_start_time
+                    if decode_start_time is None and not any(scheduler.waiting
+                                                             for scheduler in self.llm_engine.scheduler):
+                        logger.info(f'start decoding')
+                        decode_start_time = time.perf_counter()
+                        torch.cuda.cudart().cudaProfilerStart()
+                    step_outputs = self.llm_engine.step(thread_idx)
+                    for output in step_outputs:
+                        if output.finished:
+                            outputs.append(output)
+                            if pbar is not None:
+                                update_pbar(output)
+
+        threads = [Thread(target=run_engine, args=(idx,)) for
+                   idx in range(self.llm_engine.scheduler_config.num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        decode_finish_time = time.perf_counter()
+        if pbar is not None:
             pbar.close()
         if decode_start_time:
             tpt = total_out_toks / (decode_finish_time - decode_start_time)

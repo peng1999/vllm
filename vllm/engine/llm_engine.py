@@ -193,7 +193,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
-        thread_cnt: int = 0,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -339,8 +338,10 @@ class LLMEngine:
             # different process.
             self.tokenizer.ping()
 
+        num_threads = scheduler_config.num_threads
+
         assert parallel_config.pipeline_parallel_size == 1 or (
-                    thread_cnt == 1), "Pipline parallel and multi-thread is incompatible"
+                    num_threads == 1), "Pipline parallel and multi-thread is incompatible"
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -348,9 +349,8 @@ class LLMEngine:
             Scheduler(scheduler_config, cache_config, lora_config,
                       parallel_config.pipeline_parallel_size)
             for _ in range(parallel_config.pipeline_parallel_size)
-            for _ in range(thread_cnt)
+            for _ in range(num_threads)
         ]
-        self.thread_cnt = thread_cnt
 
         # Metric Logging.
         if self.log_stats:
@@ -487,7 +487,6 @@ class LLMEngine:
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-        thread_cnt: int = 1,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -500,7 +499,6 @@ class LLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
-            thread_cnt=thread_cnt,
         )
 
         return engine
@@ -1523,7 +1521,7 @@ class LLMEngine:
         if num_total_gpu is not None:
             num_free_gpu = sum(
                 scheduler.block_manager.get_num_free_gpu_blocks()
-                for scheduler in self.scheduler) / self.thread_cnt
+                for scheduler in self.scheduler) / self.scheduler_config.num_threads
             gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
@@ -1531,7 +1529,7 @@ class LLMEngine:
         if num_total_cpu is not None and num_total_cpu > 0:
             num_free_cpu = sum(
                 scheduler.block_manager.get_num_free_cpu_blocks()
-                for scheduler in self.scheduler) / self.thread_cnt
+                for scheduler in self.scheduler) / self.scheduler_config.num_threads
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Prefix Cache Hit Rate. Note that we always use
