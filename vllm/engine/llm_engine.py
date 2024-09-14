@@ -401,6 +401,7 @@ class LLMEngine:
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
             for _ in range(self.parallel_config.pipeline_parallel_size)
+            for _ in range(self.scheduler_config.num_threads)
         ]
 
     def _initialize_kv_caches(self) -> None:
@@ -1332,7 +1333,7 @@ class LLMEngine:
 
         # These are cached outputs from previous iterations. None if on first
         # iteration
-        cached_outputs = self.cached_scheduler_outputs[0]
+        cached_outputs = self.cached_scheduler_outputs[thread_idx]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
 
@@ -1348,7 +1349,7 @@ class LLMEngine:
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
                 self._cache_scheduler_outputs_for_multi_step(
-                    0, seq_group_metadata_list, scheduler_outputs)
+                    thread_idx, seq_group_metadata_list, scheduler_outputs)
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
@@ -1362,7 +1363,7 @@ class LLMEngine:
             # sampled_token_ids, as a separate broadcast over all the PP stages
             # will cause one virtual engine's microbatch to block the pipeline.
             last_sampled_token_ids = \
-                self._get_last_sampled_token_ids(0)
+                self._get_last_sampled_token_ids(thread_idx)
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -1373,7 +1374,8 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                thread_idx=thread_idx)
 
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
@@ -1381,7 +1383,7 @@ class LLMEngine:
             # we need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
             if self.scheduler_config.is_multi_step:
-                self._update_cached_scheduler_output(0, output)
+                self._update_cached_scheduler_output(thread_idx, output)
         else:
             output = []
 
@@ -1393,7 +1395,7 @@ class LLMEngine:
         if not self._has_remaining_steps(seq_group_metadata_list):
             # clear the cache if we have finished all the steps
             if self.scheduler_config.is_multi_step:
-                self.cached_scheduler_outputs[0] = SchedulerOutputState()
+                self.cached_scheduler_outputs[thread_idx] = SchedulerOutputState()
             request_outputs = self._process_model_outputs(
                 output, scheduler_outputs.scheduled_seq_groups,
                 scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)

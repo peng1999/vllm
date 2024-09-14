@@ -1293,6 +1293,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
+    # The thread index.
+    thread_idx: int = 1
 
     @property
     def is_first_multi_step(self) -> bool:

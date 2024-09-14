@@ -71,6 +71,8 @@ class GPUExecutor(ExecutorBase):
         if self.scheduler_config.is_multi_step:
             worker_module_name = "vllm.worker.multi_step_worker"
             worker_class_name = "MultiStepWorker"
+            if self.scheduler_config.num_threads > 1:
+                worker_class_name = "ThreadMultiStepWorker"
         elif self.speculative_config:
             worker_module_name = "vllm.spec_decode.spec_decode_worker"
             worker_class_name = "create_spec_worker"

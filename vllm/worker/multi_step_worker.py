@@ -1,14 +1,17 @@
+import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import torch
 
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
+from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import (MultiStepModelRunner,
                                                  StatefulModelInput)
 from vllm.worker.worker import Worker, WorkerInput
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase
 
 
 @dataclass
@@ -17,11 +20,15 @@ class MultiStepState:
     model_input: StatefulModelInput
 
 
-class MultiStepWorker(Worker):
+class MultiStepWorker(LocalOrDistributedWorkerBase):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        base_model_runner = self.model_runner
+
+    def __init__(self, worker: Worker = None, *args, **kwargs):
+        if worker is None:
+            self.worker = Worker(*args, **kwargs)
+        else:
+            self.worker = worker
+        base_model_runner = self.worker.model_runner
         # for multi-step model, wrap the model runner with MultiStepModelRunner
         self.model_runner = MultiStepModelRunner(
             base_model_runner,
@@ -31,14 +38,15 @@ class MultiStepWorker(Worker):
             base_model_runner.device_config,
             base_model_runner.cache_config,
             load_config=base_model_runner.load_config,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
+            lora_config=self.worker.lora_config,
+            kv_cache_dtype=self.worker.cache_config.cache_dtype,
             is_driver_worker=base_model_runner.is_driver_worker,
             prompt_adapter_config=base_model_runner.prompt_adapter_config,
             observability_config=base_model_runner.observability_config,
         )
 
-        pipeline_parallel_size = self.parallel_config.pipeline_parallel_size
+
+        pipeline_parallel_size = self.worker.parallel_config.pipeline_parallel_size
         self.multi_step_states: List[
             Optional[MultiStepState]] = [None] * pipeline_parallel_size
         self.temp_output = None
@@ -49,7 +57,7 @@ class MultiStepWorker(Worker):
         """
         Get the driver input and broadcast it to other workers.
         """
-        assert self.is_driver_worker
+        assert self.worker.is_driver_worker
         virtual_engine = execute_model_req.virtual_engine
         is_first_multi_step = execute_model_req.is_first_multi_step
         if is_first_multi_step:
@@ -141,7 +149,7 @@ class MultiStepWorker(Worker):
         this method may skip the normal _prepare_model_input and
         _prepare_worker_input methods and instead used cached values.
         """
-        if self.is_driver_worker:
+        if self.worker.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
                     # This signals that there's no more requests to process for
@@ -192,3 +200,116 @@ class MultiStepWorker(Worker):
         assert model_input is not None
         assert worker_input is not None
         return model_input, worker_input, kwargs
+
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.worker.do_metadata_broadcast
+
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        return self.worker.kv_cache
+
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        return self.worker.prepare_worker_input(execute_model_req)
+
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        self.worker.execute_worker(worker_input)
+
+    def init_device(self) -> None:
+        self.worker.init_device()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError()
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError()
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError()
+
+
+class ThreadMultiStepWorker(LocalOrDistributedWorkerBase):
+
+    def __init__(self, *args, **kwargs):
+        self.worker = Worker(*args, **kwargs)
+        self.sub_workers: List[MultiStepWorker] = []
+        for _ in range(self.worker.scheduler_config.num_threads):
+            self.sub_workers.append(MultiStepWorker(worker=self.worker, *args, **kwargs))
+
+    def _get_driver_input_and_broadcast(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+        thread_idx = execute_model_req.thread_idx
+        return self.sub_workers[thread_idx]._get_worker_input_from_broadcast(execute_model_req)
+
+    def prepare_input(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        thread_idx = execute_model_req.thread_idx
+        return self.sub_workers[thread_idx].prepare_input(execute_model_req)
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        thread_idx = execute_model_req.thread_idx
+        return self.sub_workers[thread_idx].execute_model(execute_model_req)
+
+    def load_model(self):
+        self.worker.load_model()
+
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.worker.do_metadata_broadcast
+
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        return self.worker.kv_cache
+
+    def prepare_worker_input(self,
+                             execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        return self.worker.prepare_worker_input(execute_model_req)
+
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        self.worker.execute_worker(worker_input)
+
+    def init_device(self) -> None:
+        self.worker.init_device()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError()
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError()
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError()
